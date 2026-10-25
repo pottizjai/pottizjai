@@ -26,7 +26,7 @@ threading.Thread(target=run_web_server, daemon=True).start()
 # 1. Connect to MongoDB and fetch tokens using Environment Variables
 MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
-    print("Error: MONGO_URI secret is not set!")
+    print("Error: MONGO_URI secret is not set!", flush=True)
     exit()
 
 db = MongoClient(MONGO_URI)["youtube_bot"]
@@ -35,7 +35,7 @@ chat_history = db["processed_messages_v2"]
 
 token_data = token_collection.find_one({"_id": "youtube_auth"})
 if not token_data:
-    print("Error: No tokens found in database. Run login.py first.")
+    print("Error: No tokens found in database. Run login.py first.", flush=True)
     exit()
 
 # 2. Rebuild credentials and auto-refresh if expired
@@ -75,46 +75,58 @@ def extract_video_id(url_or_id):
 
 
 def main():
-    print("Bot is starting up...\n")
+    print("Bot is starting up...\n", flush=True)
 
     # 3. Get stream link or ID from Render environment variables
     stream_input = os.getenv("STREAM_INPUT")
     if not stream_input:
-        print("Error: STREAM_INPUT environment variable is not set!")
+        print("Error: STREAM_INPUT environment variable is not set!", flush=True)
         return
     stream_input = stream_input.strip()
 
     video_id = extract_video_id(stream_input)
+    print(f"Target Video ID: {video_id}", flush=True)
 
     live_chat_id = None
     try:
         # Fetch live streaming details using the provided video ID
         video_response = youtube.videos().list(
-            part="liveStreamingDetails",
+            part="liveStreamingDetails,snippet",
             id=video_id
         ).execute()
 
         items = video_response.get("items", [])
-        if not items or "liveStreamingDetails" not in items[0] or "activeLiveChatId" not in items[0]["liveStreamingDetails"]:
-            print("Error: No active live chat found for this link. Make sure the stream is currently live and chat is enabled.")
+        if not items:
+            print("Error: Video ID not found on YouTube.", flush=True)
             return
 
-        live_chat_id = items[0]["liveStreamingDetails"]["activeLiveChatId"]
-        print(f"Successfully connected to Live Chat ID: {live_chat_id}\n")
+        item = items[0]
+        print(f"Video Title: {item.get('snippet', {}).get('title')}", flush=True)
+
+        if "liveStreamingDetails" not in item:
+            print("Error: This video does not have liveStreamingDetails (it may not be recognized as a live stream by YouTube's API).", flush=True)
+            return
+
+        if "activeLiveChatId" not in item["liveStreamingDetails"]:
+            print("Error: liveStreamingDetails found, but no activeLiveChatId is present. Make sure chat is enabled and public.", flush=True)
+            return
+
+        live_chat_id = item["liveStreamingDetails"]["activeLiveChatId"]
+        print(f"Successfully connected to Live Chat ID: {live_chat_id}\n", flush=True)
 
     except Exception as e:
-        print(f"Error fetching live stream details: {e}")
+        print(f"Error fetching live stream details: {e}", flush=True)
         return
 
     # Ensure a strict unique index on msg_id now that the collection is fresh
     try:
         chat_history.create_index("msg_id", unique=True)
-        print("Unique message index created successfully.")
+        print("Unique message index created successfully.", flush=True)
     except Exception as e:
-        print(f"Index creation note: {e}")
+        print(f"Index creation note: {e}", flush=True)
 
     # 4. Continuous Chat Polling Loop
-    print("Listening to chat messages... (Press Ctrl+C to stop)\n")
+    print("Listening to chat messages... (Press Ctrl+C to stop)\n", flush=True)
     while True:
         try:
             chat_response = (
@@ -131,8 +143,6 @@ def main():
             for msg in messages:
                 msg_id = msg["id"]
 
-                # Strict database-level duplicate protection:
-                # If msg_id already exists, insert_one fails and we skip instantly.
                 try:
                     chat_history.insert_one({"msg_id": msg_id})
                 except Exception:
@@ -179,15 +189,15 @@ def main():
                                 }
                             },
                         ).execute()
-                        print(f"Replied to {author}: {text}")
+                        print(f"Replied to {author}: {text}", flush=True)
                     except Exception as e:
-                        print(f"Error sending YouTube reply: {e}")
+                        print(f"Error sending YouTube reply: {e}", flush=True)
 
             # Respect YouTube's recommended polling rate
             time.sleep(polling_interval_ms / 1000.0)
 
         except Exception as e:
-            print(f"Error processing chat: {e}")
+            print(f"Error processing chat: {e}", flush=True)
             time.sleep(5)
 
 
