@@ -1,6 +1,7 @@
 import os
 import time
 import re
+import random
 import threading
 from flask import Flask
 from pymongo import MongoClient
@@ -22,11 +23,10 @@ def run_web_server():
 threading.Thread(target=run_web_server, daemon=True).start()
 # ---------------------------------------------
 
-# (Keep your MongoDB setup, credentials, and extract_video_id function here...)
-# 1. Connect to MongoDB and fetch tokens using Replit Secrets
+# 1. Connect to MongoDB and fetch tokens using Environment Variables
 MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
-    print("Error: MONGO_URI secret is not set in Replit!")
+    print("Error: MONGO_URI secret is not set!")
     exit()
 
 db = MongoClient(MONGO_URI)["youtube_bot"]
@@ -62,10 +62,10 @@ def extract_video_id(url_or_id):
     if len(url_or_id) == 11 and "/" not in url_or_id and "?" not in url_or_id:
         return url_or_id
     patterns = [
-        r"(?:v=|\/)([0-9A-Za-z_-]{11}).*",
-        r"(?:embed\/)([0-9A-Za-z_-]{11})",
-        r"(?:watch\?v=)([0-9A-Za-z_-]{11})",
-        r"(?:youtu\.be\/)([0-9A-Za-z_-]{11})",
+        r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',
+        r'(?:embed\/)([0-9A-Za-z_-]{11})',
+        r'(?:watch\?v=)([0-9A-Za-z_-]{11})',
+        r'(?:youtu\.be\/)([0-9A-Za-z_-]{11})'
     ]
     for pattern in patterns:
         match = re.search(pattern, url_or_id)
@@ -83,25 +83,20 @@ def main():
         print("Error: STREAM_INPUT environment variable is not set!")
         return
     stream_input = stream_input.strip()
-    
+
     video_id = extract_video_id(stream_input)
 
     live_chat_id = None
     try:
         # Fetch live streaming details using the provided video ID
-        video_response = (
-            youtube.videos().list(part="liveStreamingDetails", id=video_id).execute()
-        )
+        video_response = youtube.videos().list(
+            part="liveStreamingDetails",
+            id=video_id
+        ).execute()
 
         items = video_response.get("items", [])
-        if (
-            not items
-            or "liveStreamingDetails" not in items[0]
-            or "activeLiveChatId" not in items[0]["liveStreamingDetails"]
-        ):
-            print(
-                "Error: No active live chat found for this link. Make sure the stream is currently live and chat is enabled."
-            )
+        if not items or "liveStreamingDetails" not in items[0] or "activeLiveChatId" not in items[0]["liveStreamingDetails"]:
+            print("Error: No active live chat found for this link. Make sure the stream is currently live and chat is enabled.")
             return
 
         live_chat_id = items[0]["liveStreamingDetails"]["activeLiveChatId"]
@@ -110,6 +105,9 @@ def main():
     except Exception as e:
         print(f"Error fetching live stream details: {e}")
         return
+
+    # Ensure a unique index on msg_id to prevent duplicate processing
+    chat_history.create_index("msg_id", unique=True)
 
     # 4. Continuous Chat Polling Loop
     print("Listening to chat messages... (Press Ctrl+C to stop)\n")
@@ -129,38 +127,56 @@ def main():
             for msg in messages:
                 msg_id = msg["id"]
 
-                # Skip if already replied in a previous loop
-                if chat_history.find_one({"msg_id": msg_id}):
+                # Prevent duplicates atomically using MongoDB unique index
+                try:
+                    chat_history.insert_one({"msg_id": msg_id})
+                except Exception:
                     continue
 
                 text = msg["snippet"]["displayMessage"]
                 author = msg["authorDetails"]["displayName"]
 
-                # Simple Bot Commands Logic
+                # Bot Commands Logic
                 reply_text = None
-                if text.lower() == "!ping":
+                clean_text = text.lower().strip()
+
+                if clean_text == "!ping" or clean_text.startswith("!ping "):
                     reply_text = f"Pong! Hello {author}!"
-                elif text.lower() == "!discord":
-                    reply_text = (
-                        "Join our community Discord server here: discord.gg/example"
-                    )
+                elif clean_text == "!discord" or clean_text.startswith("!discord "):
+                    reply_text = "Join our community Discord server here: discord.gg/example"
+                elif clean_text == "!coinflip" or clean_text.startswith("!coinflip "):
+                    outcome = random.choice(["Heads", "Tails"])
+                    reply_text = f"🪙 Coin Flip Result for {author}: {outcome}!"
+                elif clean_text == "!8ball" or clean_text.startswith("!8ball "):
+                    responses = [
+                        "Yes, definitely!",
+                        "As I see it, yes.",
+                        "Reply hazy, try again.",
+                        "Cannot predict now.",
+                        "Don't count on it.",
+                        "My sources say no.",
+                        "Outlook not so good.",
+                        "Very doubtful."
+                    ]
+                    answer = random.choice(responses)
+                    reply_text = f"🔮 Magic 8-Ball says to {author}: {answer}"
 
-                # 5. Send Reply and Mark as Processed
+                # 5. Send Reply and Handle Errors
                 if reply_text:
-                    youtube.liveChatMessages().insert(
-                        part="snippet",
-                        body={
-                            "snippet": {
-                                "liveChatId": live_chat_id,
-                                "type": "textMessageEvent",
-                                "textMessageDetails": {"messageText": reply_text},
-                            }
-                        },
-                    ).execute()
-                    print(f"Replied to {author}: {text}")
-
-                # Log message as handled so we never repeat answers
-                chat_history.insert_one({"msg_id": msg_id})
+                    try:
+                        youtube.liveChatMessages().insert(
+                            part="snippet",
+                            body={
+                                "snippet": {
+                                    "liveChatId": live_chat_id,
+                                    "type": "textMessageEvent",
+                                    "textMessageDetails": {"messageText": reply_text},
+                                }
+                            },
+                        ).execute()
+                        print(f"Replied to {author}: {text}")
+                    except Exception as e:
+                        print(f"Error sending YouTube reply: {e}")
 
             # Respect YouTube's recommended polling rate
             time.sleep(polling_interval_ms / 1000.0)
