@@ -1,11 +1,28 @@
 import os
 import time
 import re
+import threading
+from flask import Flask
 from pymongo import MongoClient
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 
+# --- Mini Web Server to keep Render Awake ---
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "YouTube Bot is alive!"
+
+def run_web_server():
+    app.run(host='0.0.0.0', port=8080)
+
+# Start the web server in a separate background thread
+threading.Thread(target=run_web_server, daemon=True).start()
+# ---------------------------------------------
+
+# (Keep your MongoDB setup, credentials, and extract_video_id function here...)
 # 1. Connect to MongoDB and fetch tokens using Replit Secrets
 MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
