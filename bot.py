@@ -77,6 +77,17 @@ def extract_video_id(url_or_id):
 def main():
     print("Bot is starting up...\n", flush=True)
 
+    # Fetch the authenticated bot's own channel ID to prevent self-reply loops
+    bot_channel_id = None
+    try:
+        channels_response = youtube.channels().list(part="id", mine=True).execute()
+        items = channels_response.get("items", [])
+        if items:
+            bot_channel_id = items[0]["id"]
+            print(f"Authenticated Bot Channel ID: {bot_channel_id}", flush=True)
+    except Exception as e:
+        print(f"Note: Could not fetch bot channel ID: {e}", flush=True)
+
     # 3. Get stream link or ID from Render environment variables
     stream_input = os.getenv("STREAM_INPUT")
     if not stream_input:
@@ -139,7 +150,12 @@ def main():
                 msg_id = msg["id"]
                 text = msg["snippet"]["displayMessage"]
                 author = msg["authorDetails"]["displayName"]
-                
+                author_channel_id = msg["authorDetails"].get("channelId")
+
+                # Ignore messages sent by the bot itself
+                if bot_channel_id and author_channel_id == bot_channel_id:
+                    continue
+
                 print(f"[{author}] says: {text}", flush=True)
 
                 # Try to claim this message in MongoDB to prevent duplicate processing
