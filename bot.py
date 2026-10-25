@@ -31,7 +31,6 @@ if not MONGO_URI:
 
 db = MongoClient(MONGO_URI)["youtube_bot"]
 token_collection = db["tokens"]
-# Using a fresh collection name avoids old index conflicts completely!
 chat_history = db["processed_messages_v2"]
 
 token_data = token_collection.find_one({"_id": "youtube_auth"})
@@ -107,6 +106,13 @@ def main():
         print(f"Error fetching live stream details: {e}")
         return
 
+    # Ensure a strict unique index on msg_id now that the collection is fresh
+    try:
+        chat_history.create_index("msg_id", unique=True)
+        print("Unique message index created successfully.")
+    except Exception as e:
+        print(f"Index creation note: {e}")
+
     # 4. Continuous Chat Polling Loop
     print("Listening to chat messages... (Press Ctrl+C to stop)\n")
     while True:
@@ -125,13 +131,11 @@ def main():
             for msg in messages:
                 msg_id = msg["id"]
 
-                # Atomically try to claim this message using upsert
-                result = chat_history.update_one(
-                    {"msg_id": msg_id},
-                    {"$setOnInsert": {"msg_id": msg_id}},
-                    upsert=True
-                )
-                if result.upserted_id is None:
+                # Strict database-level duplicate protection:
+                # If msg_id already exists, insert_one fails and we skip instantly.
+                try:
+                    chat_history.insert_one({"msg_id": msg_id})
+                except Exception:
                     continue
 
                 text = msg["snippet"]["displayMessage"]
