@@ -5,29 +5,30 @@ import random
 import threading
 from flask import Flask
 from pymongo import MongoClient
+from pymongo.errors import DuplicateKeyError
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 
-# --- Mini Web Server to keep Render Awake ---
+# --- 1. Flask Web Server to Keep Render Awake ---
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "YouTube Bot is alive!"
+    return "YouTube Live Chat Bot is running smoothly!"
 
 def run_web_server():
     app.run(host='0.0.0.0', port=8080)
 
-# Start the web server in a separate background thread
+# Start web server in background thread
 threading.Thread(target=run_web_server, daemon=True).start()
-# ---------------------------------------------
 
-# 1. Connect to MongoDB and fetch tokens using Environment Variables
+
+# --- 2. Database & YouTube API Initialization ---
 MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
-    print("Error: MONGO_URI secret is not set!", flush=True)
-    exit()
+    print("Error: MONGO_URI environment variable is not set!", flush=True)
+    exit(1)
 
 db = MongoClient(MONGO_URI)["youtube_bot"]
 token_collection = db["tokens"]
@@ -35,10 +36,10 @@ chat_history = db["processed_messages_v2"]
 
 token_data = token_collection.find_one({"_id": "youtube_auth"})
 if not token_data:
-    print("Error: No tokens found in database. Run login.py first.", flush=True)
-    exit()
+    print("Error: No YouTube authentication tokens found in MongoDB.", flush=True)
+    exit(1)
 
-# 2. Rebuild credentials and auto-refresh if expired
+# Rebuild OAuth2 credentials and refresh if needed
 creds = Credentials(
     token=token_data["token"],
     refresh_token=token_data["refresh_token"],
@@ -74,19 +75,34 @@ def extract_video_id(url_or_id):
     return url_or_id
 
 
+# --- 3. Main Bot Logic ---
 def main():
-    print("Bot is starting up...\n", flush=True)
+    print("Bot is starting up...", flush=True)
 
-    # 3. Get stream link or ID from Render environment variables
+    # Fetch authenticated bot identity to filter out self-replies
+    bot_channel_id = None
+    bot_display_name = None
+    try:
+        channels_response = youtube.channels().list(part="snippet", mine=True).execute()
+        items = channels_response.get("items", [])
+        if items:
+            bot_channel_id = items[0]["id"]
+            bot_display_name = items[0]["snippet"]["title"]
+            print(f"Authenticated as: {bot_display_name} (Channel ID: {bot_channel_id})", flush=True)
+    except Exception as e:
+        print(f"Warning: Could not fetch bot profile details: {e}", flush=True)
+
+    # Get stream input from environment variables
     stream_input = os.getenv("STREAM_INPUT")
     if not stream_input:
         print("Error: STREAM_INPUT environment variable is not set!", flush=True)
         return
+    
     stream_input = stream_input.strip()
-
     video_id = extract_video_id(stream_input)
     print(f"Target Video ID: {video_id}", flush=True)
 
+    # Fetch live chat ID from video details
     live_chat_id = None
     try:
         video_response = youtube.videos().list(
@@ -96,14 +112,14 @@ def main():
 
         items = video_response.get("items", [])
         if not items:
-            print("Error: Video ID not found on YouTube.", flush=True)
+            print("Error: Video ID could not be found on YouTube.", flush=True)
             return
 
         item = items[0]
-        print(f"Video Title: {item.get('snippet', {}).get('title')}", flush=True)
+        print(f"Stream Title: {item.get('snippet', {}).get('title')}", flush=True)
 
         if "liveStreamingDetails" not in item or "activeLiveChatId" not in item["liveStreamingDetails"]:
-            print("Error: No active live chat found.", flush=True)
+            print("Error: No active live chat found for this video. Ensure it is live and chat is enabled.", flush=True)
             return
 
         live_chat_id = item["liveStreamingDetails"]["activeLiveChatId"]
@@ -113,24 +129,24 @@ def main():
         print(f"Error fetching live stream details: {e}", flush=True)
         return
 
-    # Ensure a strict unique index on msg_id
+    # Ensure unique index exists on MongoDB collection for duplicate prevention
     try:
         chat_history.create_index("msg_id", unique=True)
-        print("Unique message index created successfully.", flush=True)
+        print("MongoDB unique index on 'msg_id' verified.", flush=True)
     except Exception as e:
-        print(f"Index creation note: {e}", flush=True)
+        print(f"Index note: {e}", flush=True)
 
-    # Memory cache to track messages sent by the bot and prevent loops
-    sent_replies = set()
+    print("Listening to live chat messages...\n", flush=True)
 
-    # 4. Continuous Chat Polling Loop
-    print("Listening to chat messages... (Press Ctrl+C to stop)\n", flush=True)
+    # --- 4. Continuous Polling Loop ---
     while True:
         try:
             chat_response = (
                 youtube.liveChatMessages()
                 .list(
-                    liveChatId=live_chat_id, part="snippet,authorDetails", maxResults=15
+                    liveChatId=live_chat_id,
+                    part="snippet,authorDetails",
+                    maxResults=15
                 )
                 .execute()
             )
@@ -142,21 +158,25 @@ def main():
                 msg_id = msg["id"]
                 text = msg["snippet"]["displayMessage"]
                 author = msg["authorDetails"]["displayName"]
+                author_channel_id = msg["authorDetails"].get("channelId")
 
-                # Ignore any message text that the bot itself recently sent
-                if text in sent_replies:
+                # 1. Prevent infinite loops by ignoring messages sent by the bot itself
+                if bot_channel_id and author_channel_id == bot_channel_id:
+                    continue
+                if bot_display_name and author.lower() == bot_display_name.lower():
+                    continue
+
+                # 2. Strict Database-level duplicate prevention
+                try:
+                    chat_history.insert_one({"msg_id": msg_id})
+                except DuplicateKeyError:
+                    continue  # Already processed this message
+                except Exception:
                     continue
 
                 print(f"[{author}] says: {text}", flush=True)
 
-                # Try to claim this message in MongoDB to prevent duplicate processing
-                try:
-                    chat_history.insert_one({"msg_id": msg_id})
-                except Exception:
-                    # Already processed this message ID
-                    continue
-
-                # Bot Commands Logic
+                # --- 5. Command Handling ---
                 reply_text = None
                 clean_text = text.lower().strip()
 
@@ -181,7 +201,7 @@ def main():
                     answer = random.choice(responses)
                     reply_text = f"🔮 Magic 8-Ball says to {author}: {answer}"
 
-                # 5. Send Reply and Handle Errors
+                # --- 6. Send Reply to YouTube ---
                 if reply_text:
                     try:
                         youtube.liveChatMessages().insert(
@@ -194,21 +214,15 @@ def main():
                                 }
                             },
                         ).execute()
-                        
-                        # Add reply to local cache so the bot ignores its own output
-                        sent_replies.add(reply_text)
-                        if len(sent_replies) > 100:  # Keep set size managed
-                            sent_replies.pop()
-
-                        print(f"--> Successfully Replied to {author}: {reply_text}", flush=True)
+                        print(f"Replied to {author}: {reply_text}", flush=True)
                     except Exception as e:
                         print(f"Error sending YouTube reply: {e}", flush=True)
 
-            # Respect YouTube's recommended polling rate
+            # Respect YouTube's API recommended polling rate
             time.sleep(polling_interval_ms / 1000.0)
 
         except Exception as e:
-            print(f"Error processing chat: {e}", flush=True)
+            print(f"Error in polling loop: {e}", flush=True)
             time.sleep(5)
 
 
