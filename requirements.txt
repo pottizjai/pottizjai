@@ -1,0 +1,6 @@
+google-auth==2.29.0
+google-auth-oauthlib==1.2.0
+google-auth-httplib2==0.2.0
+google-api-python-client==2.125.0
+pymongo==4.6.3
+dnspython==2.6.1
