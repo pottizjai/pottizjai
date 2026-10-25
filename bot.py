@@ -3,6 +3,7 @@ import time
 import re
 import random
 import threading
+from datetime import datetime
 from flask import Flask
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
@@ -136,14 +137,50 @@ def main():
     except Exception as e:
         print(f"Index note: {e}", flush=True)
 
+    # Quota tracker, shutdown flag, and user cooldown dictionaries
+    estimated_units_used = 0
+    last_reset_day = datetime.utcnow().strftime("%Y-%m-%d")
+    shutdown_sent = False
+    user_cooldowns = {}  # author -> timestamp of last command
+    COOLDOWN_SECONDS = 10
+
     print("Initializing chat sync (ignoring past messages)...", flush=True)
 
-    # --- 4. Continuous Polling Loop with Startup Seeding ---
+    # --- 4. Continuous Polling Loop ---
     page_token = None
     is_startup = True
 
     while True:
         try:
+            # Reset local quota tracker if the day changed
+            current_day = datetime.utcnow().strftime("%Y-%m-%d")
+            if current_day != last_reset_day:
+                estimated_units_used = 0
+                last_reset_day = current_day
+                shutdown_sent = False
+                print("New day detected: Local quota tracker reset.", flush=True)
+
+            # Quota Safety Check: If quota is nearing 10,000 units, send final shutdown message and stop
+            if estimated_units_used >= 9900 and not shutdown_sent:
+                shutdown_sent = True
+                try:
+                    youtube.liveChatMessages().insert(
+                        part="snippet",
+                        body={
+                            "snippet": {
+                                "liveChatId": live_chat_id,
+                                "type": "textMessageEvent",
+                                "textMessageDetails": {
+                                    "messageText": "Quota exhausted for today! Bye, see you tomorrow."
+                                },
+                            }
+                        },
+                    ).execute()
+                    print("Quota limit reached. Shutdown message sent. Pausing bot loop.", flush=True)
+                except Exception:
+                    pass
+                break  # Stop execution to avoid quota exceptions
+
             kwargs = {
                 "liveChatId": live_chat_id,
                 "part": "snippet,authorDetails",
@@ -153,6 +190,9 @@ def main():
                 kwargs["pageToken"] = page_token
 
             chat_response = youtube.liveChatMessages().list(**kwargs).execute()
+            
+            # Each list request costs 5 quota units
+            estimated_units_used += 5
 
             messages = chat_response.get("items", [])
             polling_interval_ms = chat_response.get("pollingIntervalMillis", 5000)
@@ -168,9 +208,7 @@ def main():
                 if is_startup:
                     try:
                         chat_history.insert_one({"msg_id": msg_id})
-                    except DuplicateKeyError:
-                        pass
-                    except Exception:
+                    except (DuplicateKeyError, Exception):
                         pass
                     continue
 
@@ -184,38 +222,40 @@ def main():
                 try:
                     chat_history.insert_one({"msg_id": msg_id})
                 except DuplicateKeyError:
-                    continue  # Already processed this message
+                    continue  
                 except Exception:
                     continue
 
                 print(f"[{author}] says: {text}", flush=True)
 
-                # --- 5. Command Handling ---
+                # --- 5. Command Handling & User Cooldowns ---
                 reply_text = None
                 clean_text = text.lower().strip()
 
-                if clean_text == "!ping" or clean_text.startswith("!ping "):
-                    reply_text = f"Pong! Hello {author}!"
-                elif clean_text == "!discord" or clean_text.startswith("!discord "):
-                    reply_text = "Join our community Discord server here: discord.gg/example"
-                elif clean_text == "!coinflip" or clean_text.startswith("!coinflip "):
-                    outcome = random.choice(["Heads", "Tails"])
-                    reply_text = f"🪙 Coin Flip Result for {author}: {outcome}!"
-                elif clean_text == "!8ball" or clean_text.startswith("!8ball "):
-                    responses = [
-                        "Yes, definitely!",
-                        "As I see it, yes.",
-                        "Reply hazy, try again.",
-                        "Cannot predict now.",
-                        "Don't count on it.",
-                        "My sources say no.",
-                        "Outlook not so good.",
-                        "Very doubtful."
-                    ]
-                    answer = random.choice(responses)
-                    reply_text = f"🔮 Magic 8-Ball says to {author}: {answer}"
+                if clean_text.startswith("!"):
+                    # Check per-user cooldown (10 seconds)
+                    last_time = user_cooldowns.get(author, 0)
+                    if time.time() - last_time < COOLDOWN_SECONDS:
+                        continue  # Ignore if user is spamming commands
+                    user_cooldowns[author] = time.time()
 
-                # --- 6. Send Reply to YouTube ---
+                    if clean_text == "!discord" or clean_text.startswith("!discord "):
+                        reply_text = "Join our community Discord server here: discord.gg/example"
+                    elif clean_text == "!coinflip" or clean_text.startswith("!coinflip "):
+                        outcome = random.choice(["Heads", "Tails"])
+                        reply_text = f"🪙 Coin Flip Result for {author}: {outcome}!"
+                    elif clean_text == "!8ball" or clean_text.startswith("!8ball "):
+                        responses = [
+                            "Yes, definitely!", "As I see it, yes.", "Reply hazy, try again.",
+                            "Cannot predict now.", "Don't count on it.", "My sources say no.",
+                            "Outlook not so good.", "Very doubtful."
+                        ]
+                        reply_text = f"🔮 Magic 8-Ball says to {author}: {random.choice(responses)}"
+                    elif clean_text == "!pp" or clean_text.startswith("!pp "):
+                        size = random.randint(1, 100)
+                        reply_text = f"Your pp is {size} inches"
+
+                # --- 6. Send Reply to YouTube & Track Quota ---
                 if reply_text:
                     try:
                         youtube.liveChatMessages().insert(
@@ -228,21 +268,24 @@ def main():
                                 }
                             },
                         ).execute()
-                        print(f"Replied to {author}: {reply_text}", flush=True)
+                        # Each insert request costs 50 quota units
+                        estimated_units_used += 50
+                        print(f"Replied to {author}: {reply_text} (Est. Quota Used Today: {estimated_units_used}/10000)", flush=True)
                     except Exception as e:
                         print(f"Error sending YouTube reply: {e}", flush=True)
 
-            # After the first batch is processed, disable startup mode so live messages trigger responses
+            # After the first batch is processed, disable startup mode
             if is_startup:
                 is_startup = False
                 print("Startup sync complete! Now actively listening for NEW live chat messages...\n", flush=True)
 
-            # Respect YouTube's API recommended polling rate
-            time.sleep(polling_interval_ms / 1000.0)
+            # Safe polling rate floor (12 seconds)
+            safe_sleep_time = max(polling_interval_ms / 1000.0, 12.0)
+            time.sleep(safe_sleep_time)
 
         except Exception as e:
             print(f"Error in polling loop: {e}", flush=True)
-            time.sleep(5)
+            time.sleep(10)
 
 
 if __name__ == "__main__":
