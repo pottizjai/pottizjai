@@ -77,17 +77,6 @@ def extract_video_id(url_or_id):
 def main():
     print("Bot is starting up...\n", flush=True)
 
-    # Fetch the authenticated bot's own channel ID to prevent self-reply loops
-    bot_channel_id = None
-    try:
-        channels_response = youtube.channels().list(part="id", mine=True).execute()
-        items = channels_response.get("items", [])
-        if items:
-            bot_channel_id = items[0]["id"]
-            print(f"Authenticated Bot Channel ID: {bot_channel_id}", flush=True)
-    except Exception as e:
-        print(f"Note: Could not fetch bot channel ID: {e}", flush=True)
-
     # 3. Get stream link or ID from Render environment variables
     stream_input = os.getenv("STREAM_INPUT")
     if not stream_input:
@@ -131,6 +120,9 @@ def main():
     except Exception as e:
         print(f"Index creation note: {e}", flush=True)
 
+    # Memory cache to track messages sent by the bot and prevent loops
+    sent_replies = set()
+
     # 4. Continuous Chat Polling Loop
     print("Listening to chat messages... (Press Ctrl+C to stop)\n", flush=True)
     while True:
@@ -150,10 +142,9 @@ def main():
                 msg_id = msg["id"]
                 text = msg["snippet"]["displayMessage"]
                 author = msg["authorDetails"]["displayName"]
-                author_channel_id = msg["authorDetails"].get("channelId")
 
-                # Ignore messages sent by the bot itself
-                if bot_channel_id and author_channel_id == bot_channel_id:
+                # Ignore any message text that the bot itself recently sent
+                if text in sent_replies:
                     continue
 
                 print(f"[{author}] says: {text}", flush=True)
@@ -203,6 +194,12 @@ def main():
                                 }
                             },
                         ).execute()
+                        
+                        # Add reply to local cache so the bot ignores its own output
+                        sent_replies.add(reply_text)
+                        if len(sent_replies) > 100:  # Keep set size managed
+                            sent_replies.pop()
+
                         print(f"--> Successfully Replied to {author}: {reply_text}", flush=True)
                     except Exception as e:
                         print(f"Error sending YouTube reply: {e}", flush=True)
