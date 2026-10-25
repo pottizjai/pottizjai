@@ -138,21 +138,23 @@ def main():
 
     print("Listening to live chat messages...\n", flush=True)
 
-    # --- 4. Continuous Polling Loop ---
+    # --- 4. Continuous Polling Loop with PageToken Pagination ---
+    page_token = None
     while True:
         try:
-            chat_response = (
-                youtube.liveChatMessages()
-                .list(
-                    liveChatId=live_chat_id,
-                    part="snippet,authorDetails",
-                    maxResults=15
-                )
-                .execute()
-            )
+            kwargs = {
+                "liveChatId": live_chat_id,
+                "part": "snippet,authorDetails",
+                "maxResults": 15
+            }
+            if page_token:
+                kwargs["pageToken"] = page_token
+
+            chat_response = youtube.liveChatMessages().list(**kwargs).execute()
 
             messages = chat_response.get("items", [])
             polling_interval_ms = chat_response.get("pollingIntervalMillis", 5000)
+            page_token = chat_response.get("nextPageToken")
 
             for msg in messages:
                 msg_id = msg["id"]
