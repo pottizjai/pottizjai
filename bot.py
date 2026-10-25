@@ -136,10 +136,12 @@ def main():
     except Exception as e:
         print(f"Index note: {e}", flush=True)
 
-    print("Listening to live chat messages...\n", flush=True)
+    print("Initializing chat sync (ignoring past messages)...", flush=True)
 
-    # --- 4. Continuous Polling Loop with PageToken Pagination ---
+    # --- 4. Continuous Polling Loop with Startup Seeding ---
     page_token = None
+    is_startup = True
+
     while True:
         try:
             kwargs = {
@@ -161,6 +163,16 @@ def main():
                 text = msg["snippet"]["displayMessage"]
                 author = msg["authorDetails"]["displayName"]
                 author_channel_id = msg["authorDetails"].get("channelId")
+
+                # If this is the startup fetch, just seed the DB with existing history and DO NOT reply
+                if is_startup:
+                    try:
+                        chat_history.insert_one({"msg_id": msg_id})
+                    except DuplicateKeyError:
+                        pass
+                    except Exception:
+                        pass
+                    continue
 
                 # 1. Prevent infinite loops by ignoring messages sent by the bot itself
                 if bot_channel_id and author_channel_id == bot_channel_id:
@@ -219,6 +231,11 @@ def main():
                         print(f"Replied to {author}: {reply_text}", flush=True)
                     except Exception as e:
                         print(f"Error sending YouTube reply: {e}", flush=True)
+
+            # After the first batch is processed, disable startup mode so live messages trigger responses
+            if is_startup:
+                is_startup = False
+                print("Startup sync complete! Now actively listening for NEW live chat messages...\n", flush=True)
 
             # Respect YouTube's API recommended polling rate
             time.sleep(polling_interval_ms / 1000.0)
