@@ -89,7 +89,6 @@ def main():
 
     live_chat_id = None
     try:
-        # Fetch live streaming details using the provided video ID
         video_response = youtube.videos().list(
             part="liveStreamingDetails,snippet",
             id=video_id
@@ -103,12 +102,8 @@ def main():
         item = items[0]
         print(f"Video Title: {item.get('snippet', {}).get('title')}", flush=True)
 
-        if "liveStreamingDetails" not in item:
-            print("Error: This video does not have liveStreamingDetails (it may not be recognized as a live stream by YouTube's API).", flush=True)
-            return
-
-        if "activeLiveChatId" not in item["liveStreamingDetails"]:
-            print("Error: liveStreamingDetails found, but no activeLiveChatId is present. Make sure chat is enabled and public.", flush=True)
+        if "liveStreamingDetails" not in item or "activeLiveChatId" not in item["liveStreamingDetails"]:
+            print("Error: No active live chat found.", flush=True)
             return
 
         live_chat_id = item["liveStreamingDetails"]["activeLiveChatId"]
@@ -118,7 +113,7 @@ def main():
         print(f"Error fetching live stream details: {e}", flush=True)
         return
 
-    # Ensure a strict unique index on msg_id now that the collection is fresh
+    # Ensure a strict unique index on msg_id
     try:
         chat_history.create_index("msg_id", unique=True)
         print("Unique message index created successfully.", flush=True)
@@ -142,14 +137,17 @@ def main():
 
             for msg in messages:
                 msg_id = msg["id"]
+                text = msg["snippet"]["displayMessage"]
+                author = msg["authorDetails"]["displayName"]
+                
+                print(f"[{author}] says: {text}", flush=True)
 
+                # Try to claim this message in MongoDB to prevent duplicate processing
                 try:
                     chat_history.insert_one({"msg_id": msg_id})
                 except Exception:
+                    # Already processed this message ID
                     continue
-
-                text = msg["snippet"]["displayMessage"]
-                author = msg["authorDetails"]["displayName"]
 
                 # Bot Commands Logic
                 reply_text = None
@@ -189,7 +187,7 @@ def main():
                                 }
                             },
                         ).execute()
-                        print(f"Replied to {author}: {text}", flush=True)
+                        print(f"--> Successfully Replied to {author}: {reply_text}", flush=True)
                     except Exception as e:
                         print(f"Error sending YouTube reply: {e}", flush=True)
 
