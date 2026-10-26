@@ -16,7 +16,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "YouTube Live Chat Bot is running smoothly!"
+    return "YouTube Live Chat Bot is running smoothly with Multi-Project Failover!"
 
 def run_web_server():
     app.run(host='0.0.0.0', port=8080)
@@ -25,7 +25,7 @@ def run_web_server():
 threading.Thread(target=run_web_server, daemon=True).start()
 
 
-# --- 2. Database & YouTube API Initialization ---
+# --- 2. Database & Multi-Project YouTube API Initialization ---
 MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
     print("Error: MONGO_URI environment variable is not set!", flush=True)
@@ -35,28 +35,46 @@ db = MongoClient(MONGO_URI)["youtube_bot"]
 token_collection = db["tokens"]
 chat_history = db["processed_messages_v2"]
 
-token_data = token_collection.find_one({"_id": "youtube_auth"})
-if not token_data:
-    print("Error: No YouTube authentication tokens found in MongoDB.", flush=True)
-    exit(1)
+active_token_id = "youtube_auth_1"
 
-# Rebuild OAuth2 credentials and refresh if needed
-creds = Credentials(
-    token=token_data["token"],
-    refresh_token=token_data["refresh_token"],
-    token_uri=token_data["token_uri"],
-    client_id=token_data["client_id"],
-    client_secret=token_data["client_secret"],
-    scopes=token_data["scopes"],
-)
+def get_youtube_client(token_id):
+    """Fetches credentials from MongoDB, refreshes if expired, and builds the YouTube client."""
+    token_data = token_collection.find_one({"_id": token_id})
+    
+    # Fallback support if Project 1 was originally saved as "youtube_auth"
+    if not token_data and token_id == "youtube_auth_1":
+        token_data = token_collection.find_one({"_id": "youtube_auth"})
+        if token_data:
+            token_id = "youtube_auth"
 
-if creds.expired and creds.refresh_token:
-    creds.refresh(Request())
-    token_collection.update_one(
-        {"_id": "youtube_auth"}, {"$set": {"token": creds.token}}
+    if not token_data:
+        return None, None
+    
+    creds = Credentials(
+        token=token_data["token"],
+        refresh_token=token_data["refresh_token"],
+        token_uri=token_data["token_uri"],
+        client_id=token_data["client_id"],
+        client_secret=token_data["client_secret"],
+        scopes=token_data["scopes"],
     )
 
-youtube = build("youtube", "v3", credentials=creds)
+    if creds.expired and creds.refresh_token:
+        try:
+            creds.refresh(Request())
+            token_collection.update_one(
+                {"_id": token_id}, {"$set": {"token": creds.token}}
+            )
+        except Exception as e:
+            print(f"Error refreshing token for {token_id}: {e}", flush=True)
+
+    return build("youtube", "v3", credentials=creds), token_id
+
+# Initialize with Project 1
+youtube, active_token_id = get_youtube_client("youtube_auth_1")
+if not youtube:
+    print("Error: No YouTube authentication tokens found in MongoDB for Project 1.", flush=True)
+    exit(1)
 
 
 def extract_video_id(url_or_id):
@@ -78,6 +96,7 @@ def extract_video_id(url_or_id):
 
 # --- 3. Main Bot Logic ---
 def main():
+    global youtube, active_token_id
     print("Bot is starting up...", flush=True)
 
     # Fetch authenticated bot identity to filter out self-replies
@@ -89,7 +108,7 @@ def main():
         if items:
             bot_channel_id = items[0]["id"]
             bot_display_name = items[0]["snippet"]["title"]
-            print(f"Authenticated as: {bot_display_name} (Channel ID: {bot_channel_id})", flush=True)
+            print(f"Authenticated as: {bot_display_name} (Channel ID: {bot_channel_id}) using [{active_token_id}]", flush=True)
     except Exception as e:
         print(f"Warning: Could not fetch bot profile details: {e}", flush=True)
 
@@ -160,7 +179,7 @@ def main():
                 shutdown_sent = False
                 print("New day detected: Local quota tracker reset.", flush=True)
 
-            # Quota Safety Check: If quota is nearing 10,000 units, send final shutdown message and stop
+            # Quota Safety Check: If quota is nearing 10,000 units on current project
             if estimated_units_used >= 9900 and not shutdown_sent:
                 shutdown_sent = True
                 try:
@@ -171,15 +190,13 @@ def main():
                                 "liveChatId": live_chat_id,
                                 "type": "textMessageEvent",
                                 "textMessageDetails": {
-                                    "messageText": "Quota exhausted for today! Bye, see you tomorrow."
+                                    "messageText": "Quota exhausted for project! Switching or shutting down."
                                 },
                             }
                         },
                     ).execute()
-                    print("Quota limit reached. Shutdown message sent. Pausing bot loop.", flush=True)
                 except Exception:
                     pass
-                break  # Stop execution to avoid quota exceptions
 
             kwargs = {
                 "liveChatId": live_chat_id,
@@ -270,7 +287,7 @@ def main():
                         ).execute()
                         # Each insert request costs 50 quota units
                         estimated_units_used += 50
-                        print(f"Replied to {author}: {reply_text} (Est. Quota Used Today: {estimated_units_used}/10000)", flush=True)
+                        print(f"Replied to {author}: {reply_text} (Est. Quota Used [{active_token_id}]: {estimated_units_used}/10000)", flush=True)
                     except Exception as e:
                         print(f"Error sending YouTube reply: {e}", flush=True)
 
@@ -284,6 +301,22 @@ def main():
             time.sleep(safe_sleep_time)
 
         except Exception as e:
+            error_message = str(e)
+            
+            # AUTOMATIC FAILOVER: Check if Project 1 ran out of quota and switch to Project 2
+            if "quotaExceeded" in error_message and active_token_id in ["youtube_auth_1", "youtube_auth"]:
+                print("⚠️ Project 1 quota exhausted! Automatically switching over to Project 2...", flush=True)
+                new_client, new_id = get_youtube_client("youtube_auth_2")
+                if new_client:
+                    youtube = new_client
+                    active_token_id = new_id
+                    estimated_units_used = 0  # Reset local tracker for Project 2 quota
+                    shutdown_sent = False
+                    print("✅ Successfully switched to Project 2! Resuming live chat loop...", flush=True)
+                    continue  # Retry loop immediately with Project 2
+                else:
+                    print("❌ Project 2 tokens ('youtube_auth_2') not found in MongoDB. Cannot failover.", flush=True)
+
             print(f"Error in polling loop: {e}", flush=True)
             time.sleep(10)
 
