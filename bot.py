@@ -16,7 +16,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "YouTube Live Chat Bot is running smoothly with Multi-Project Failover!"
+    return "YouTube Live Chat Bot is running smoothly with Multi-Project Failover & Enhanced Logging!"
 
 def run_web_server():
     app.run(host='0.0.0.0', port=8080)
@@ -257,10 +257,15 @@ def main():
             if page_token:
                 kwargs["pageToken"] = page_token
 
+            # Log check for chat
+            current_time_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+            print(f"[{current_time_str}] 🔍 Checking chat messages via [{active_token_id}]...", flush=True)
+
             chat_response = youtube.liveChatMessages().list(**kwargs).execute()
             
             # Each list request costs 5 quota units
             estimated_units_used += 5
+            quota_remaining = max(0, 10000 - estimated_units_used)
 
             messages = chat_response.get("items", [])
             polling_interval_ms = chat_response.get("pollingIntervalMillis", 5000)
@@ -294,7 +299,8 @@ def main():
                 except Exception:
                     continue
 
-                print(f"[{author}] says: {text}", flush=True)
+                # Log new message found in chat
+                print(f"💬 New Chat Message -> [{author}]: {text}", flush=True)
 
                 # --- 5. Command Handling & User Cooldowns ---
                 reply_text = None
@@ -338,7 +344,10 @@ def main():
                         ).execute()
                         # Each insert request costs 50 quota units
                         estimated_units_used += 50
-                        print(f"Replied to {author}: {reply_text} (Est. Quota Used [{active_token_id}]: {estimated_units_used}/10000)", flush=True)
+                        quota_remaining = max(0, 10000 - estimated_units_used)
+                        
+                        # Enhanced Reply & Quota Log
+                        print(f"🤖 Replied to {author}: \"{reply_text}\" | Quota Used: {estimated_units_used}/10000 | Quota Remaining: {quota_remaining} (Token: {active_token_id})", flush=True)
                     except Exception as e:
                         print(f"Error sending YouTube reply: {e}", flush=True)
 
