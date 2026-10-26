@@ -94,12 +94,33 @@ def extract_video_id(url_or_id):
     return url_or_id
 
 
+def is_quota_error(error_message):
+    """Robust helper to check if any error string indicates a quota limit issue."""
+    err_lower = error_message.lower()
+    return "quota" in err_lower and ("exceeded" in err_lower or "limit" in err_lower or "403" in err_lower)
+
+
+def switch_to_project_2():
+    """Helper function to switch YouTube client to Project 2."""
+    global youtube, active_token_id
+    print("⚠️ Quota exhausted! Automatically switching over to Project 2...", flush=True)
+    new_client, new_id = get_youtube_client("youtube_auth_2")
+    if new_client:
+        youtube = new_client
+        active_token_id = new_id
+        print("✅ Successfully switched to Project 2!", flush=True)
+        return True
+    else:
+        print("❌ Project 2 tokens ('youtube_auth_2') not found in MongoDB. Cannot failover.", flush=True)
+        return False
+
+
 # --- 3. Main Bot Logic ---
 def main():
     global youtube, active_token_id
     print("Bot is starting up...", flush=True)
 
-    # Fetch authenticated bot identity to filter out self-replies
+    # Fetch authenticated bot identity with startup failover check
     bot_channel_id = None
     bot_display_name = None
     try:
@@ -110,7 +131,19 @@ def main():
             bot_display_name = items[0]["snippet"]["title"]
             print(f"Authenticated as: {bot_display_name} (Channel ID: {bot_channel_id}) using [{active_token_id}]", flush=True)
     except Exception as e:
-        print(f"Warning: Could not fetch bot profile details: {e}", flush=True)
+        if is_quota_error(str(e)) and active_token_id in ["youtube_auth_1", "youtube_auth"]:
+            if switch_to_project_2():
+                try:
+                    channels_response = youtube.channels().list(part="snippet", mine=True).execute()
+                    items = channels_response.get("items", [])
+                    if items:
+                        bot_channel_id = items[0]["id"]
+                        bot_display_name = items[0]["snippet"]["title"]
+                        print(f"Authenticated as: {bot_display_name} (Channel ID: {bot_channel_id}) using [{active_token_id}]", flush=True)
+                except Exception as inner_e:
+                    print(f"Warning: Could not fetch bot profile details on Project 2: {inner_e}", flush=True)
+        else:
+            print(f"Warning: Could not fetch bot profile details: {e}", flush=True)
 
     # Get stream input from environment variables
     stream_input = os.getenv("STREAM_INPUT")
@@ -122,7 +155,7 @@ def main():
     video_id = extract_video_id(stream_input)
     print(f"Target Video ID: {video_id}", flush=True)
 
-    # Fetch live chat ID from video details
+    # Fetch live chat ID from video details with startup failover check
     live_chat_id = None
     try:
         video_response = youtube.videos().list(
@@ -146,8 +179,26 @@ def main():
         print(f"Successfully connected to Live Chat ID: {live_chat_id}\n", flush=True)
 
     except Exception as e:
-        print(f"Error fetching live stream details: {e}", flush=True)
-        return
+        if is_quota_error(str(e)) and active_token_id in ["youtube_auth_1", "youtube_auth"]:
+            if switch_to_project_2():
+                try:
+                    video_response = youtube.videos().list(
+                        part="liveStreamingDetails,snippet",
+                        id=video_id
+                    ).execute()
+                    items = video_response.get("items", [])
+                    if items:
+                        item = items[0]
+                        print(f"Stream Title: {item.get('snippet', {}).get('title')}", flush=True)
+                        if "liveStreamingDetails" in item and "activeLiveChatId" in item["liveStreamingDetails"]:
+                            live_chat_id = item["liveStreamingDetails"]["activeLiveChatId"]
+                            print(f"Successfully connected to Live Chat ID on Project 2: {live_chat_id}\n", flush=True)
+                except Exception as inner_e:
+                    print(f"Error fetching live stream details on Project 2: {inner_e}", flush=True)
+                    return
+        if not live_chat_id:
+            print(f"Error fetching live stream details: {e}", flush=True)
+            return
 
     # Ensure unique index exists on MongoDB collection for duplicate prevention
     try:
@@ -303,19 +354,13 @@ def main():
         except Exception as e:
             error_message = str(e)
             
-            # AUTOMATIC FAILOVER: Check if Project 1 ran out of quota and switch to Project 2
-            if "quotaExceeded" in error_message and active_token_id in ["youtube_auth_1", "youtube_auth"]:
-                print("⚠️ Project 1 quota exhausted! Automatically switching over to Project 2...", flush=True)
-                new_client, new_id = get_youtube_client("youtube_auth_2")
-                if new_client:
-                    youtube = new_client
-                    active_token_id = new_id
+            # AUTOMATIC FAILOVER: Catch any variation of quota exceeded and switch to Project 2
+            if is_quota_error(error_message) and active_token_id in ["youtube_auth_1", "youtube_auth"]:
+                if switch_to_project_2():
                     estimated_units_used = 0  # Reset local tracker for Project 2 quota
                     shutdown_sent = False
-                    print("✅ Successfully switched to Project 2! Resuming live chat loop...", flush=True)
+                    print("Resuming live chat loop with Project 2...", flush=True)
                     continue  # Retry loop immediately with Project 2
-                else:
-                    print("❌ Project 2 tokens ('youtube_auth_2') not found in MongoDB. Cannot failover.", flush=True)
 
             print(f"Error in polling loop: {e}", flush=True)
             time.sleep(10)
