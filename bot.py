@@ -303,8 +303,8 @@ def main():
                         print(f"Error sending YouTube reply: {e}", flush=True)
 
             safe_sleep_time = max(polling_interval_ms / 1000.0, 12.0)
+            print(f"💤 Finished check. Sleeping for {safe_sleep_time:.1f} seconds...", flush=True)
             time.sleep(safe_sleep_time)
-
         except Exception as e:
             error_message = str(e)
             if is_quota_error(error_message) and active_token_id in ["youtube_auth_1", "youtube_auth"]:
