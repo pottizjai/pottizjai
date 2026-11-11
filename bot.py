@@ -314,7 +314,7 @@ def main():
                     user_cooldowns[author] = time.time()
 
                     if clean_text == "!discord" or clean_text.startswith("!discord "):
-                        reply_text = "Join our community Discord server here: discord.gg/example"
+                        reply_text = "Join our community Discord server here: discord.gg/jai"
                     elif clean_text == "!coinflip" or clean_text.startswith("!coinflip "):
                         outcome = random.choice(["Heads", "Tails"])
                         reply_text = f"🪙 Coin Flip Result for {author}: {outcome}!"
