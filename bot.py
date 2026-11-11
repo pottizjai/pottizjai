@@ -16,7 +16,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "YouTube Live Chat Bot is running smoothly with Multi-Project Failover & Enhanced Logging!"
+    return "YouTube Live Chat Bot is running smoothly!"
 
 def run_web_server():
     app.run(host='0.0.0.0', port=8080)
@@ -41,7 +41,6 @@ def get_youtube_client(token_id):
     """Fetches credentials from MongoDB, refreshes if expired, and builds the YouTube client."""
     token_data = token_collection.find_one({"_id": token_id})
     
-    # Fallback support if Project 1 was originally saved as "youtube_auth"
     if not token_data and token_id == "youtube_auth_1":
         token_data = token_collection.find_one({"_id": "youtube_auth"})
         if token_data:
@@ -70,7 +69,6 @@ def get_youtube_client(token_id):
 
     return build("youtube", "v3", credentials=creds), token_id
 
-# Initialize with Project 1
 youtube, active_token_id = get_youtube_client("youtube_auth_1")
 if not youtube:
     print("Error: No YouTube authentication tokens found in MongoDB for Project 1.", flush=True)
@@ -95,13 +93,11 @@ def extract_video_id(url_or_id):
 
 
 def is_quota_error(error_message):
-    """Robust helper to check if any error string indicates a quota limit issue."""
     err_lower = error_message.lower()
     return "quota" in err_lower and ("exceeded" in err_lower or "limit" in err_lower or "403" in err_lower)
 
 
 def switch_to_project_2():
-    """Helper function to switch YouTube client to Project 2."""
     global youtube, active_token_id
     print("⚠️ Quota exhausted! Automatically switching over to Project 2...", flush=True)
     new_client, new_id = get_youtube_client("youtube_auth_2")
@@ -120,7 +116,6 @@ def main():
     global youtube, active_token_id
     print("Bot is starting up...", flush=True)
 
-    # Fetch authenticated bot identity with startup failover check
     bot_channel_id = None
     bot_display_name = None
     try:
@@ -131,21 +126,8 @@ def main():
             bot_display_name = items[0]["snippet"]["title"]
             print(f"Authenticated as: {bot_display_name} (Channel ID: {bot_channel_id}) using [{active_token_id}]", flush=True)
     except Exception as e:
-        if is_quota_error(str(e)) and active_token_id in ["youtube_auth_1", "youtube_auth"]:
-            if switch_to_project_2():
-                try:
-                    channels_response = youtube.channels().list(part="snippet", mine=True).execute()
-                    items = channels_response.get("items", [])
-                    if items:
-                        bot_channel_id = items[0]["id"]
-                        bot_display_name = items[0]["snippet"]["title"]
-                        print(f"Authenticated as: {bot_display_name} (Channel ID: {bot_channel_id}) using [{active_token_id}]", flush=True)
-                except Exception as inner_e:
-                    print(f"Warning: Could not fetch bot profile details on Project 2: {inner_e}", flush=True)
-        else:
-            print(f"Warning: Could not fetch bot profile details: {e}", flush=True)
+        print(f"Warning: Could not fetch bot profile details: {e}", flush=True)
 
-    # Get stream input from environment variables
     stream_input = os.getenv("STREAM_INPUT")
     if not stream_input:
         print("Error: STREAM_INPUT environment variable is not set!", flush=True)
@@ -155,7 +137,6 @@ def main():
     video_id = extract_video_id(stream_input)
     print(f"Target Video ID: {video_id}", flush=True)
 
-    # Fetch live chat ID from video details with startup failover check
     live_chat_id = None
     try:
         video_response = youtube.videos().list(
@@ -172,82 +153,65 @@ def main():
         print(f"Stream Title: {item.get('snippet', {}).get('title')}", flush=True)
 
         if "liveStreamingDetails" not in item or "activeLiveChatId" not in item["liveStreamingDetails"]:
-            print("Error: No active live chat found for this video. Ensure it is live and chat is enabled.", flush=True)
+            print("Error: No active live chat found for this video.", flush=True)
             return
 
         live_chat_id = item["liveStreamingDetails"]["activeLiveChatId"]
         print(f"Successfully connected to Live Chat ID: {live_chat_id}\n", flush=True)
 
     except Exception as e:
-        if is_quota_error(str(e)) and active_token_id in ["youtube_auth_1", "youtube_auth"]:
-            if switch_to_project_2():
-                try:
-                    video_response = youtube.videos().list(
-                        part="liveStreamingDetails,snippet",
-                        id=video_id
-                    ).execute()
-                    items = video_response.get("items", [])
-                    if items:
-                        item = items[0]
-                        print(f"Stream Title: {item.get('snippet', {}).get('title')}", flush=True)
-                        if "liveStreamingDetails" in item and "activeLiveChatId" in item["liveStreamingDetails"]:
-                            live_chat_id = item["liveStreamingDetails"]["activeLiveChatId"]
-                            print(f"Successfully connected to Live Chat ID on Project 2: {live_chat_id}\n", flush=True)
-                except Exception as inner_e:
-                    print(f"Error fetching live stream details on Project 2: {inner_e}", flush=True)
-                    return
-        if not live_chat_id:
-            print(f"Error fetching live stream details: {e}", flush=True)
-            return
+        print(f"Error fetching live stream details: {e}", flush=True)
+        return
 
-    # Ensure unique index exists on MongoDB collection for duplicate prevention
     try:
         chat_history.create_index("msg_id", unique=True)
         print("MongoDB unique index on 'msg_id' verified.", flush=True)
     except Exception as e:
         print(f"Index note: {e}", flush=True)
 
-    # Quota tracker, shutdown flag, and user cooldown dictionaries
     estimated_units_used = 0
     last_reset_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     shutdown_sent = False
-    user_cooldowns = {}  # author -> timestamp of last command
+    user_cooldowns = {}
     COOLDOWN_SECONDS = 10
 
-    print("Initializing chat sync (ignoring past messages)...", flush=True)
-
-    # --- 4. Continuous Polling Loop ---
+    # --- 4. Initialization: Skip existing backlog completely ---
+    print("Initializing chat sync and clearing past backlog...", flush=True)
     page_token = None
-    is_startup = True
+    
+    try:
+        # Initial call to grab the current live head token without processing old messages
+        initial_response = youtube.liveChatMessages().list(
+            liveChatId=live_chat_id,
+            part="snippet,authorDetails",
+            maxResults=200
+        ).execute()
+        
+        estimated_units_used += 5
+        page_token = initial_response.get("nextPageToken")
+        messages = initial_response.get("items", [])
+        
+        # Seed MongoDB with current backlog so they are marked as seen
+        for msg in messages:
+            try:
+                chat_history.insert_one({"msg_id": msg["id"]})
+            except Exception:
+                pass
+                
+        print(f"Startup sync complete! Seeded {len(messages)} past messages. Now listening for NEW live chat messages...", flush=True)
+    except Exception as e:
+        print(f"Error during initial sync: {e}", flush=True)
 
+    polling_interval_ms = 5000
+
+    # --- 5. Continuous Polling Loop ---
     while True:
         try:
-            # Reset local quota tracker if the day changed
             current_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             if current_day != last_reset_day:
                 estimated_units_used = 0
                 last_reset_day = current_day
                 shutdown_sent = False
-                print("New day detected: Local quota tracker reset.", flush=True)
-
-            # Quota Safety Check: If quota is nearing 10,000 units on current project
-            if estimated_units_used >= 9900 and not shutdown_sent:
-                shutdown_sent = True
-                try:
-                    youtube.liveChatMessages().insert(
-                        part="snippet",
-                        body={
-                            "snippet": {
-                                "liveChatId": live_chat_id,
-                                "type": "textMessageEvent",
-                                "textMessageDetails": {
-                                    "messageText": "Quota exhausted for project! Switching or shutting down."
-                                },
-                            }
-                        },
-                    ).execute()
-                except Exception:
-                    pass
 
             kwargs = {
                 "liveChatId": live_chat_id,
@@ -257,22 +221,19 @@ def main():
             if page_token:
                 kwargs["pageToken"] = page_token
 
-            # Log check for chat
             current_time_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
             print(f"[{current_time_str}] 🔍 Checking chat messages via [{active_token_id}]...", flush=True)
 
             chat_response = youtube.liveChatMessages().list(**kwargs).execute()
-            
-            # Each list request costs 5 quota units
             estimated_units_used += 5
-            quota_remaining = max(0, 10000 - estimated_units_used)
 
             messages = chat_response.get("items", [])
             polling_interval_ms = chat_response.get("pollingIntervalMillis", 5000)
-            page_token = chat_response.get("nextPageToken")
-
-            # --- DEBUG PRINT ---
-            print(f"DEBUG: Fetched {len(messages)} messages from YouTube. Next Page Token present: {bool(page_token)}", flush=True)
+            
+            # Only update page_token if a new one is provided by YouTube
+            new_page_token = chat_response.get("nextPageToken")
+            if new_page_token:
+                page_token = new_page_token
 
             for msg in messages:
                 msg_id = msg["id"]
@@ -280,44 +241,31 @@ def main():
                 author = msg["authorDetails"]["displayName"]
                 author_channel_id = msg["authorDetails"].get("channelId")
 
-                # --- TEMP DEBUG: See every message coming from YouTube ---
-                print(f"RAW FETCHED -> [{author}]: {text}", flush=True)
-
-                # If this is the startup fetch, just seed the DB with existing history and DO NOT reply
-                if is_startup:
-                    try:
-                        chat_history.insert_one({"msg_id": msg_id})
-                    except (DuplicateKeyError, Exception):
-                        pass
-                    continue
-
-                # 1. Prevent infinite loops by ignoring messages sent by the bot itself
+                # 1. Ignore bot's own messages
                 if bot_channel_id and author_channel_id == bot_channel_id:
                     continue
                 if bot_display_name and author.lower() == bot_display_name.lower():
                     continue
 
-                # 2. Strict Database-level duplicate prevention
+                # 2. Database-level duplicate prevention
                 try:
                     chat_history.insert_one({"msg_id": msg_id})
                 except DuplicateKeyError:
-                    print(f"Skipped duplicate: {text}", flush=True)
                     continue  
                 except Exception:
                     continue
 
-                # Log new message found in chat
+                # Log brand-new message found in chat
                 print(f"💬 New Chat Message -> [{author}]: {text}", flush=True)
 
-                # --- 5. Command Handling & User Cooldowns ---
+                # --- 6. Command Handling ---
                 reply_text = None
                 clean_text = text.lower().strip()
 
                 if clean_text.startswith("!"):
-                    # Check per-user cooldown (10 seconds)
                     last_time = user_cooldowns.get(author, 0)
                     if time.time() - last_time < COOLDOWN_SECONDS:
-                        continue  # Ignore if user is spamming commands
+                        continue
                     user_cooldowns[author] = time.time()
 
                     if clean_text == "!discord" or clean_text.startswith("!discord "):
@@ -336,7 +284,7 @@ def main():
                         size = random.randint(1, 100)
                         reply_text = f"Your pp is {size} inches"
 
-                # --- 6. Send Reply to YouTube & Track Quota ---
+                # --- 7. Send Reply ---
                 if reply_text:
                     try:
                         youtube.liveChatMessages().insert(
@@ -349,34 +297,21 @@ def main():
                                 }
                             },
                         ).execute()
-                        # Each insert request costs 50 quota units
                         estimated_units_used += 50
-                        quota_remaining = max(0, 10000 - estimated_units_used)
-                        
-                        # Enhanced Reply & Quota Log
-                        print(f"🤖 Replied to {author}: \"{reply_text}\" | Quota Used: {estimated_units_used}/10000 | Quota Remaining: {quota_remaining} (Token: {active_token_id})", flush=True)
+                        print(f"🤖 Replied to {author}: \"{reply_text}\"", flush=True)
                     except Exception as e:
                         print(f"Error sending YouTube reply: {e}", flush=True)
 
-            # After the first batch is processed, disable startup mode
-            if is_startup:
-                is_startup = False
-                print("Startup sync complete! Now actively listening for NEW live chat messages...\n", flush=True)
-
-            # Safe polling rate floor (12 seconds)
             safe_sleep_time = max(polling_interval_ms / 1000.0, 12.0)
             time.sleep(safe_sleep_time)
 
         except Exception as e:
             error_message = str(e)
-            
-            # AUTOMATIC FAILOVER: Catch any variation of quota exceeded and switch to Project 2
             if is_quota_error(error_message) and active_token_id in ["youtube_auth_1", "youtube_auth"]:
                 if switch_to_project_2():
-                    estimated_units_used = 0  # Reset local tracker for Project 2 quota
+                    estimated_units_used = 0
                     shutdown_sent = False
-                    print("Resuming live chat loop with Project 2...", flush=True)
-                    continue  # Retry loop immediately with Project 2
+                    continue
 
             print(f"Error in polling loop: {e}", flush=True)
             time.sleep(10)
