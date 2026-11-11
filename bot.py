@@ -3,7 +3,7 @@ import time
 import re
 import random
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from flask import Flask
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
@@ -209,7 +209,7 @@ def main():
 
     # Quota tracker, shutdown flag, and user cooldown dictionaries
     estimated_units_used = 0
-    last_reset_day = datetime.utcnow().strftime("%Y-%m-%d")
+    last_reset_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     shutdown_sent = False
     user_cooldowns = {}  # author -> timestamp of last command
     COOLDOWN_SECONDS = 10
@@ -223,7 +223,7 @@ def main():
     while True:
         try:
             # Reset local quota tracker if the day changed
-            current_day = datetime.utcnow().strftime("%Y-%m-%d")
+            current_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             if current_day != last_reset_day:
                 estimated_units_used = 0
                 last_reset_day = current_day
@@ -258,7 +258,7 @@ def main():
                 kwargs["pageToken"] = page_token
 
             # Log check for chat
-            current_time_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+            current_time_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
             print(f"[{current_time_str}] 🔍 Checking chat messages via [{active_token_id}]...", flush=True)
 
             chat_response = youtube.liveChatMessages().list(**kwargs).execute()
@@ -269,21 +269,19 @@ def main():
 
             messages = chat_response.get("items", [])
             polling_interval_ms = chat_response.get("pollingIntervalMillis", 5000)
-            new_page_token = chat_response.get("nextPageToken")
+            page_token = chat_response.get("nextPageToken")
 
             # --- DEBUG PRINT ---
-            print(f"DEBUG: Fetched {len(messages)} messages from YouTube. Next Page Token present: {bool(new_page_token)}", flush=True)
-
-            page_token = new_page_token
-            messages = chat_response.get("items", [])
-            polling_interval_ms = chat_response.get("pollingIntervalMillis", 5000)
-            page_token = chat_response.get("nextPageToken")
+            print(f"DEBUG: Fetched {len(messages)} messages from YouTube. Next Page Token present: {bool(page_token)}", flush=True)
 
             for msg in messages:
                 msg_id = msg["id"]
                 text = msg["snippet"]["displayMessage"]
                 author = msg["authorDetails"]["displayName"]
                 author_channel_id = msg["authorDetails"].get("channelId")
+
+                # --- TEMP DEBUG: See every message coming from YouTube ---
+                print(f"RAW FETCHED -> [{author}]: {text}", flush=True)
 
                 # If this is the startup fetch, just seed the DB with existing history and DO NOT reply
                 if is_startup:
@@ -303,6 +301,7 @@ def main():
                 try:
                     chat_history.insert_one({"msg_id": msg_id})
                 except DuplicateKeyError:
+                    print(f"Skipped duplicate: {text}", flush=True)
                     continue  
                 except Exception:
                     continue
