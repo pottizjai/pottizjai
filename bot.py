@@ -269,6 +269,14 @@ def main():
 
             messages = chat_response.get("items", [])
             polling_interval_ms = chat_response.get("pollingIntervalMillis", 5000)
+            new_page_token = chat_response.get("nextPageToken")
+
+            # --- DEBUG PRINT ---
+            print(f"DEBUG: Fetched {len(messages)} messages from YouTube. Next Page Token present: {bool(new_page_token)}", flush=True)
+
+            page_token = new_page_token
+            messages = chat_response.get("items", [])
+            polling_interval_ms = chat_response.get("pollingIntervalMillis", 5000)
             page_token = chat_response.get("nextPageToken")
 
             for msg in messages:
